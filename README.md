@@ -46,4 +46,4 @@ Project documentation and report: [Typst](https://typst.app/project/ra2kU2K5bMHr
 
 ## Course
 
-This project is part of **IKT469 - Deep Neural Networks** at the University of South-Eastern Norway (USN).
+This project is part of **IKT469 - Deep Neural Networks** at the University of Agder Norway (UIA).

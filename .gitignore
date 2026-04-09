@@ -1,4 +1,6 @@
 .env
 .venv
-dataset/
+dataset/*
 !dataset/*.py
+!dataset/*/*.py
+!dataset/**/*.py

@@ -1,49 +1,72 @@
-# Multimodal Architectures
+# Multimodal Architectures on MM-IMDB
 
-A deep learning project exploring multimodal models that combine text and images for classification, fusion, and representation learning.
+Semester project for IKT469 (Deep Neural Networks, UiA). Option 7 — multimodal
+classification on the MM-IMDB dataset.
 
-## Overview
+## Setup
 
-This project implements various multimodal learning techniques using the **MM-IMDB dataset**, which combines movie posters (images) with plot summaries (text) for movie genre classification.
+```bash
+uv sync                # install deps from pyproject.toml
+```
 
-## Dataset
+The dataset `dataset/multimodal_imdb.hdf5` (~16 GB) must already be present.
+It ships with pre-extracted 300-d averaged word2vec text features
+(`features`) and 4096-d VGG19 image features (`vgg_features`) — both are used
+directly as the multimodal embeddings.
 
-- **MM-IMDB**: Multimodal IMDB dataset combining movie posters and plot descriptions
-- Dataset: https://www.innovatiana.com/en/datasets/mm-imdb-multimodal-imdb-dataset
+## Running experiments
 
-## Key Components
+Every experiment is a subcommand of `main.py`. Results are written to
+`results/<experiment>.json`.
 
-### 1. Multimodal Embeddings
-- Image embeddings using pretrained vision models (e.g., ResNet, ViT)
-- Text embeddings using language models (e.g., BERT, RoBERTa)
-- Joint representation learning
+```bash
+uv run python main.py inspect-data          # print HDF5 schema + label counts
+uv run python main.py text-only             # 1. text-only baseline
+uv run python main.py image-only            # 2. image-only baseline
+uv run python main.py fusion-early          # 3. concat + MLP
+uv run python main.py fusion-late           # 4. per-modality, prob avg
+uv run python main.py fusion-gmu            # 5. Gated Multimodal Unit
+uv run python main.py semi-baseline         # 6. supervised at 20% labels
+uv run python main.py semi-pseudo           # 7. + pseudo-labeling
+uv run python main.py semi-meanteacher      # 8. + Mean Teacher
+uv run python main.py selfsup-contrastive   # 9. cross-modal InfoNCE + linear probe
+```
 
-### 2. Fusion Strategies
-- **Early Fusion**: Concatenating raw features before classification
-- **Late Fusion**: Combining predictions from separate modality-specific models
-- Comparison of fusion effectiveness for genre classification
+Common flags for every subcommand: `--epochs`, `--batch-size`, `--lr`,
+`--device {auto,cpu,cuda}`, `--seed`, `--label-fraction`.
 
-### 3. Semi-Supervised Learning
-- Pseudo-labeling for unlabeled data
-- Leveraging large amounts of unannotated movie data
+## Project layout
 
-### 4. Self-Supervised Learning
-- Consistency training across modalities
-- Contrastive learning objectives
-- Modality dropout experiments
+```
+src/
+  data/        HDF5 dataset, tiny CSV loader (smoke tests)
+  fusion/      unimodal, early (concat+MLP), late (prob-avg), gmu
+  combiner/    MultimodalClassifier
+  ssl/         pseudo-labeling, Mean Teacher, InfoNCE
+  training/    supervised + semi-supervised loops, evaluate
+tests/         pytest tests per module
+docs/          Typst report (uses unified-uia-thesis template)
+results/       per-experiment JSON metric dumps
+```
 
-## Techniques
+## Tests
 
-- Multimodal embeddings
-- Early and late fusion architectures
-- Pseudo-labeling
-- Consistency training
-- Cross-modal representation learning
+```bash
+uv run pytest -v
+```
 
-## Research
+## Report
 
-Project documentation and report: [Typst](https://typst.app/project/ra2kU2K5bMHrj9o9C3bu8W)
+Built with Typst. From `docs/`:
+
+```bash
+typst compile main.typ
+```
+
+Live editing also available at:
+[Typst project](https://typst.app/project/ra2kU2K5bMHrj9o9C3bu8W).
 
 ## Course
 
-This project is part of **IKT469 - Deep Neural Networks** at the University of Agder Norway (UIA).
+IKT469 — Deep Neural Networks, University of Agder. Group: Erlend Tregde,
+Sander Wesstøl, Linor Ujkani. Supervisor: Morten Goodwin.

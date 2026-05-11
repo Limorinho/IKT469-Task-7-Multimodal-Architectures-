@@ -4,3 +4,9 @@ dataset/*
 !dataset/*.py
 !dataset/*/*.py
 !dataset/**/*.py
+__pycache__/
+*.py[cod]
+.pytest_cache/
+results/
+docs/main.pdf
+docs/

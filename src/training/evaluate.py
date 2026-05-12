@@ -32,11 +32,12 @@ def evaluate_metrics(
     n_batches = 0
 
     for batch in loader:
-        text = batch["text_emb"].to(device)
-        image = batch["image_emb"].to(device)
-        labels = batch["label"].to(device)
+        image = batch["image"].to(device)
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        labels = batch["labels"].to(device)
 
-        logits = model(text, image)
+        logits = model(image, input_ids, attention_mask)
         total_loss += float(criterion(logits, labels).item())
         n_batches += 1
 

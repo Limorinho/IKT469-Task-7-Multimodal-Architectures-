@@ -7,11 +7,6 @@ from src.ssl.pseudo_label import pseudo_labels
 from src.ssl.mean_teacher import MeanTeacher, consistency_loss
 
 
-def _feature_noise(x: torch.Tensor, std: float = 0.1) -> torch.Tensor:
-    """Add Gaussian noise — a cheap 'view' on cached features for consistency."""
-    return x + std * torch.randn_like(x)
-
-
 def _next(loader_iter, loader):
     try:
         return next(loader_iter), loader_iter
@@ -31,7 +26,6 @@ def train_one_epoch(
     teacher: MeanTeacher | None,
     pseudo_threshold: float = 0.9,
     consistency_weight: float = 1.0,
-    noise_std: float = 0.1,
 ) -> float:
     assert mode in {"pseudo", "mean_teacher", "baseline"}
     model.train()
@@ -41,34 +35,33 @@ def train_one_epoch(
     unl_iter = iter(unlabeled_loader)
 
     for labeled_batch in labeled_loader:
-        text = labeled_batch["text_emb"].to(device)
-        image = labeled_batch["image_emb"].to(device)
-        labels = labeled_batch["label"].to(device)
+        image = labeled_batch["image"].to(device)
+        input_ids = labeled_batch["input_ids"].to(device)
+        attention_mask = labeled_batch["attention_mask"].to(device)
+        labels = labeled_batch["labels"].to(device)
 
-        logits = model(text, image)
+        logits = model(image, input_ids, attention_mask)
         loss = criterion(logits, labels)
 
         if mode != "baseline":
             unl_batch, unl_iter = _next(unl_iter, unlabeled_loader)
-            u_text = unl_batch["text_emb"].to(device)
-            u_image = unl_batch["image_emb"].to(device)
+            u_image = unl_batch["image"].to(device)
+            u_input_ids = unl_batch["input_ids"].to(device)
+            u_attention_mask = unl_batch["attention_mask"].to(device)
 
             if mode == "pseudo":
                 with torch.no_grad():
-                    pseudo_logits = model(u_text, u_image)
+                    pseudo_logits = model(u_image, u_input_ids, u_attention_mask)
                 mask, pseudo = pseudo_labels(pseudo_logits, threshold=pseudo_threshold)
                 if mask.any():
-                    student_logits = model(u_text[mask], u_image[mask])
+                    student_logits = model(u_image[mask], u_input_ids[mask], u_attention_mask[mask])
                     loss = loss + criterion(student_logits, pseudo[mask])
 
             elif mode == "mean_teacher":
                 assert teacher is not None
-                student_logits = model(
-                    _feature_noise(u_text, noise_std),
-                    _feature_noise(u_image, noise_std),
-                )
+                student_logits = model(u_image, u_input_ids, u_attention_mask)
                 with torch.no_grad():
-                    teacher_logits = teacher.teacher(u_text, u_image)
+                    teacher_logits = teacher.teacher(u_image, u_input_ids, u_attention_mask)
                 loss = loss + consistency_weight * consistency_loss(student_logits, teacher_logits)
 
         optimizer.zero_grad()

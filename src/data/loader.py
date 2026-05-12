@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import torch
 from pathlib import Path
@@ -13,6 +14,7 @@ GENRES = [
     "Short", "Sport", "Thriller", "War", "Western",
 ]
 GENRE_TO_IDX = {g: i for i, g in enumerate(GENRES)}
+NUM_GENRES = len(GENRES)
 
 IMAGE_TRANSFORM = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -22,17 +24,26 @@ IMAGE_TRANSFORM = transforms.Compose([
 
 
 class MMIMDBDataset(Dataset):
-    def __init__(self, df: pd.DataFrame, images_dir: Path, tokenizer, max_length: int = 512):
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        images_dir: Path,
+        tokenizer,
+        max_length: int = 512,
+        indices: np.ndarray | None = None,
+    ):
         self.df = df.reset_index(drop=True)
         self.images_dir = images_dir
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.subset = np.asarray(indices, dtype=np.int64) if indices is not None else None
 
-    def __len__(self):
-        return len(self.df)
+    def __len__(self) -> int:
+        return len(self.subset) if self.subset is not None else len(self.df)
 
-    def __getitem__(self, idx):
-        row = self.df.iloc[idx]
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        i = int(self.subset[idx]) if self.subset is not None else idx
+        row = self.df.iloc[i]
 
         image = Image.open(self.images_dir / row["image_path"]).convert("RGB")
         image = IMAGE_TRANSFORM(image)
@@ -63,28 +74,34 @@ def get_loaders(
     dataset_root: Path,
     tokenizer_name: str = "bert-base-uncased",
     batch_size: int = 32,
-    num_workers: int = 4,
-):
+    num_workers: int = 0,
+    label_fraction: float = 1.0,
+    seed: int = 0,
+) -> dict[str, DataLoader]:
     csv_path = dataset_root / "tinymmimdb" / "data.csv"
     images_dir = dataset_root / "tinymmimdb" / "images"
 
     df = pd.read_csv(csv_path)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
-    splits = {
-        "train": df[df["split"] == "train"],
-        "val": df[df["split"] == "dev"],
-        "test": df[df["split"] == "test"],
+    train_df = df[df["split"] == "train"].reset_index(drop=True)
+    if label_fraction < 1.0:
+        rng = np.random.default_rng(seed)
+        n = len(train_df)
+        idx = np.sort(rng.choice(n, size=int(round(n * label_fraction)), replace=False))
+        train_dataset = MMIMDBDataset(train_df, images_dir, tokenizer, indices=idx)
+    else:
+        train_dataset = MMIMDBDataset(train_df, images_dir, tokenizer)
+
+    loaders: dict[str, DataLoader] = {
+        "train": DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers),
+        "dev": DataLoader(
+            MMIMDBDataset(df[df["split"] == "dev"].reset_index(drop=True), images_dir, tokenizer),
+            batch_size=batch_size, num_workers=num_workers,
+        ),
+        "test": DataLoader(
+            MMIMDBDataset(df[df["split"] == "test"].reset_index(drop=True), images_dir, tokenizer),
+            batch_size=batch_size, num_workers=num_workers,
+        ),
     }
-
-    loaders = {}
-    for split, split_df in splits.items():
-        dataset = MMIMDBDataset(split_df, images_dir, tokenizer)
-        loaders[split] = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=(split == "train"),
-            num_workers=num_workers,
-        )
-
     return loaders

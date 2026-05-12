@@ -1,9 +1,9 @@
-"""MM-IMDB multimodal experiments.
+"""MM-IMDB multimodal experiments (tiny-mm-imdb dataset).
 
 Run a single experiment at a time, e.g.:
     python main.py inspect-data
     python main.py text-only --epochs 20
-    python main.py fusion-gmu --epochs 30 --batch-size 128
+    python main.py fusion-gmu --epochs 30 --batch-size 32
     python main.py semi-pseudo --label-fraction 0.2 --epochs 20
 
 Each experiment writes results/<name>.json with the full metric history.
@@ -16,7 +16,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-HDF5_PATH = Path("dataset/multimodal_imdb.hdf5")
+DATASET_DIR = Path("dataset/tiny-mm-imdb")
 RESULTS_DIR = Path("results")
 
 
@@ -38,33 +38,50 @@ def _device(arg: str) -> str:
 # ---------------------------------------------------------------------------
 
 def cmd_inspect_data(args):
-    import h5py
-    from src.data.hdf5_loader import MMIMDBDataset, GENRES
+    import pandas as pd
+    from src.data.loader import GENRES
 
-    with h5py.File(HDF5_PATH, "r") as f:
-        print("HDF5 datasets:")
-        for k in f.keys():
-            d = f[k]
-            print(f"  {k}: shape={d.shape} dtype={d.dtype}")
+    csv_path = DATASET_DIR / "tinymmimdb" / "data.csv"
+    df = pd.read_csv(csv_path)
+    print(f"Total samples: {len(df)}")
+    for split in ("train", "dev", "test"):
+        n = (df["split"] == split).sum()
+        print(f"  {split}: {n}")
     print("\nLabel distribution (train split):")
-    ds = MMIMDBDataset(HDF5_PATH, split="train")
-    counts = ds.labels.sum(dim=0).int().tolist()
-    for g, c in sorted(zip(GENRES, counts), key=lambda kv: -kv[1]):
+    train_df = df[df["split"] == "train"]
+    counts: dict[str, int] = {}
+    for genres_str in train_df["genre"]:
+        for g in str(genres_str).split(" - "):
+            g = g.strip()
+            if g in set(GENRES):
+                counts[g] = counts.get(g, 0) + 1
+    for g, c in sorted(counts.items(), key=lambda kv: -kv[1]):
         print(f"  {g:12s} {c}")
 
 
 def _run_supervised(args, fusion: nn.Module, name: str, hidden_dim: int = 128) -> dict:
-    from src.combiner.classifier import MultimodalClassifier
-    from src.data.hdf5_loader import get_loaders, NUM_GENRES
+    from src.combiner.classifier import EncodedMultimodalClassifier
+    from src.data.loader import get_loaders, NUM_GENRES
+    from src.encoders.image import ImageEncoder
+    from src.encoders.text import TextEncoder
     from src.training.supervised.train import run
     from src.training.evaluate import evaluate_metrics
 
     device = _device(args.device)
     torch.manual_seed(args.seed)
 
-    model = MultimodalClassifier(fusion=fusion, num_classes=NUM_GENRES, hidden_dim=hidden_dim).to(device)
+    text_enc = TextEncoder(freeze=True).to(device)
+    image_enc = ImageEncoder(freeze=True).to(device)
+    model = EncodedMultimodalClassifier(
+        text_encoder=text_enc,
+        image_encoder=image_enc,
+        fusion=fusion,
+        num_classes=NUM_GENRES,
+        hidden_dim=hidden_dim,
+    ).to(device)
+
     loaders = get_loaders(
-        HDF5_PATH,
+        DATASET_DIR,
         batch_size=args.batch_size,
         label_fraction=args.label_fraction,
         seed=args.seed,
@@ -86,23 +103,42 @@ def _run_supervised(args, fusion: nn.Module, name: str, hidden_dim: int = 128) -
 
 def cmd_text_only(args):
     from src.fusion.unimodal import TextOnly
-    _run_supervised(args, TextOnly(hidden_dim=128), name="text-only")
+    from src.encoders.text import TextEncoder
+    _run_supervised(args, TextOnly(text_dim=TextEncoder.output_dim, hidden_dim=128), name="text-only")
 
 
 def cmd_image_only(args):
     from src.fusion.unimodal import ImageOnly
-    _run_supervised(args, ImageOnly(hidden_dim=128), name="image-only")
+    from src.encoders.image import ImageEncoder
+    _run_supervised(args, ImageOnly(image_dim=ImageEncoder.output_dim, hidden_dim=128), name="image-only")
 
 
 def cmd_fusion_early(args):
     from src.fusion.early import ConcatMLP
-    _run_supervised(args, ConcatMLP(hidden_dim=128), name="fusion-early")
+    from src.encoders.image import ImageEncoder
+    from src.encoders.text import TextEncoder
+    _run_supervised(
+        args,
+        ConcatMLP(text_dim=TextEncoder.output_dim, image_dim=ImageEncoder.output_dim, hidden_dim=128),
+        name="fusion-early",
+    )
 
 
 def cmd_fusion_late(args):
     from src.fusion.late import LateFusion
-    from src.data.hdf5_loader import NUM_GENRES
-    _run_supervised(args, LateFusion(hidden_dim=128, num_classes=NUM_GENRES), name="fusion-late")
+    from src.data.loader import NUM_GENRES
+    from src.encoders.image import ImageEncoder
+    from src.encoders.text import TextEncoder
+    _run_supervised(
+        args,
+        LateFusion(
+            text_dim=TextEncoder.output_dim,
+            image_dim=ImageEncoder.output_dim,
+            hidden_dim=128,
+            num_classes=NUM_GENRES,
+        ),
+        name="fusion-late",
+    )
 
 
 class _GmuWrapper(nn.Module):
@@ -118,42 +154,69 @@ class _GmuWrapper(nn.Module):
 
 def cmd_fusion_gmu(args):
     from src.fusion.gmu import Gmu
-
-    fusion = _GmuWrapper(Gmu(text_dim=300, img_dim=4096, output_dim=128))
+    from src.encoders.image import ImageEncoder
+    from src.encoders.text import TextEncoder
+    fusion = _GmuWrapper(Gmu(text_dim=TextEncoder.output_dim, img_dim=ImageEncoder.output_dim, output_dim=128))
     _run_supervised(args, fusion, name="fusion-gmu")
 
 
 def _run_semi(args, mode: str, name: str) -> dict:
-    from src.combiner.classifier import MultimodalClassifier
-    from src.data.hdf5_loader import MMIMDBDataset, NUM_GENRES
+    import numpy as np
+    import pandas as pd
+    from torch.utils.data import DataLoader
+    from transformers import AutoTokenizer
+
+    from src.combiner.classifier import EncodedMultimodalClassifier
+    from src.data.loader import MMIMDBDataset, NUM_GENRES
+    from src.encoders.image import ImageEncoder
+    from src.encoders.text import TextEncoder
     from src.fusion.gmu import Gmu
     from src.training.semi_supervised.train import run
     from src.training.evaluate import evaluate_metrics
-    from torch.utils.data import DataLoader
-    import numpy as np
 
     device = _device(args.device)
     torch.manual_seed(args.seed)
 
-    fusion = _GmuWrapper(Gmu(text_dim=300, img_dim=4096, output_dim=128))
-    model = MultimodalClassifier(fusion=fusion, num_classes=NUM_GENRES, hidden_dim=128).to(device)
+    text_enc = TextEncoder(freeze=True).to(device)
+    image_enc = ImageEncoder(freeze=True).to(device)
+    fusion = _GmuWrapper(Gmu(text_dim=TextEncoder.output_dim, img_dim=ImageEncoder.output_dim, output_dim=128))
+    model = EncodedMultimodalClassifier(
+        text_encoder=text_enc,
+        image_encoder=image_enc,
+        fusion=fusion,
+        num_classes=NUM_GENRES,
+    ).to(device)
 
-    full_train = MMIMDBDataset(HDF5_PATH, split="train", label_fraction=1.0)
-    n = len(full_train)
+    csv_path = DATASET_DIR / "tinymmimdb" / "data.csv"
+    images_dir = DATASET_DIR / "tinymmimdb" / "images"
+    df = pd.read_csv(csv_path)
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+
+    train_df = df[df["split"] == "train"].reset_index(drop=True)
+    dev_df = df[df["split"] == "dev"].reset_index(drop=True)
+    test_df = df[df["split"] == "test"].reset_index(drop=True)
+
+    n = len(train_df)
     rng = np.random.default_rng(args.seed)
-    labeled_indices = np.sort(rng.choice(n, size=int(n * args.label_fraction), replace=False))
-    unlabeled_indices = np.setdiff1d(np.arange(n), labeled_indices, assume_unique=True)
+    labeled_idx = np.sort(rng.choice(n, size=int(n * args.label_fraction), replace=False))
+    unlabeled_idx = np.setdiff1d(np.arange(n), labeled_idx, assume_unique=True)
 
     labeled_loaders = {
         "train": DataLoader(
-            MMIMDBDataset(HDF5_PATH, split="train", indices=labeled_indices),
+            MMIMDBDataset(train_df, images_dir, tokenizer, indices=labeled_idx),
             batch_size=args.batch_size, shuffle=True,
         ),
-        "dev": DataLoader(MMIMDBDataset(HDF5_PATH, split="dev"), batch_size=args.batch_size),
-        "test": DataLoader(MMIMDBDataset(HDF5_PATH, split="test"), batch_size=args.batch_size),
+        "dev": DataLoader(
+            MMIMDBDataset(dev_df, images_dir, tokenizer),
+            batch_size=args.batch_size,
+        ),
+        "test": DataLoader(
+            MMIMDBDataset(test_df, images_dir, tokenizer),
+            batch_size=args.batch_size,
+        ),
     }
     unlabeled_loader = DataLoader(
-        MMIMDBDataset(HDF5_PATH, split="train", indices=unlabeled_indices),
+        MMIMDBDataset(train_df, images_dir, tokenizer, indices=unlabeled_idx),
         batch_size=args.batch_size, shuffle=True,
     )
 
@@ -186,18 +249,22 @@ def cmd_semi_meanteacher(args):
 
 
 def cmd_selfsup_contrastive(args):
-    from src.data.hdf5_loader import get_loaders, NUM_GENRES, TEXT_DIM, IMAGE_DIM
+    import numpy as np
+    from src.data.loader import get_loaders, NUM_GENRES
+    from src.encoders.image import ImageEncoder
+    from src.encoders.text import TextEncoder
     from src.ssl.contrastive import info_nce, ProjectionHead
     from src.training.evaluate import compute_f1_scores
-    import numpy as np
 
     device = _device(args.device)
     torch.manual_seed(args.seed)
 
-    text_proj = ProjectionHead(TEXT_DIM, hidden_dim=256, output_dim=128).to(device)
-    image_proj = ProjectionHead(IMAGE_DIM, hidden_dim=256, output_dim=128).to(device)
+    text_enc = TextEncoder(freeze=True).to(device).eval()
+    image_enc = ImageEncoder(freeze=True).to(device).eval()
+    text_proj = ProjectionHead(TextEncoder.output_dim, hidden_dim=256, output_dim=128).to(device)
+    image_proj = ProjectionHead(ImageEncoder.output_dim, hidden_dim=256, output_dim=128).to(device)
 
-    loaders = get_loaders(HDF5_PATH, batch_size=args.batch_size, label_fraction=1.0)
+    loaders = get_loaders(DATASET_DIR, batch_size=args.batch_size, label_fraction=1.0)
     optim = torch.optim.Adam(
         list(text_proj.parameters()) + list(image_proj.parameters()),
         lr=args.lr, weight_decay=1e-5,
@@ -210,8 +277,11 @@ def cmd_selfsup_contrastive(args):
         epoch_loss = 0.0
         n = 0
         for batch in loaders["train"]:
-            t = text_proj(batch["text_emb"].to(device))
-            i = image_proj(batch["image_emb"].to(device))
+            with torch.no_grad():
+                t_emb = text_enc(batch["input_ids"].to(device), batch["attention_mask"].to(device))
+                i_emb = image_enc(batch["image"].to(device))
+            t = text_proj(t_emb)
+            i = image_proj(i_emb)
             loss = info_nce(t, i, temperature=args.temperature)
             optim.zero_grad()
             loss.backward()
@@ -222,7 +292,6 @@ def cmd_selfsup_contrastive(args):
         contrastive_loss_history.append(epoch_loss)
         print(f"[contrastive] epoch {epoch+1:3d}/{args.epochs} | nce-loss {epoch_loss:.4f}")
 
-    # Linear probe on the concatenated projections, using args.label_fraction of train labels.
     text_proj.eval()
     image_proj.eval()
 
@@ -230,15 +299,17 @@ def cmd_selfsup_contrastive(args):
         zs, ys = [], []
         with torch.no_grad():
             for batch in loader:
-                t = text_proj(batch["text_emb"].to(device))
-                i = image_proj(batch["image_emb"].to(device))
+                t_emb = text_enc(batch["input_ids"].to(device), batch["attention_mask"].to(device))
+                i_emb = image_enc(batch["image"].to(device))
+                t = text_proj(t_emb)
+                i = image_proj(i_emb)
                 z = torch.cat([t, i], dim=1).cpu().numpy()
                 zs.append(z)
-                ys.append(batch["label"].numpy())
+                ys.append(batch["labels"].numpy())
         return np.concatenate(zs), np.concatenate(ys)
 
     z_train, y_train = embed(loaders["train"])
-    _, _ = embed(loaders["dev"])  # currently unused; available for future early stopping
+    _, _ = embed(loaders["dev"])
     z_test, y_test = embed(loaders["test"])
 
     if args.label_fraction < 1.0:
@@ -283,7 +354,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     def add_common(sp):
         sp.add_argument("--epochs", type=int, default=20)
-        sp.add_argument("--batch-size", type=int, default=128)
+        sp.add_argument("--batch-size", type=int, default=32)
         sp.add_argument("--lr", type=float, default=1e-3)
         sp.add_argument("--device", default="auto")
         sp.add_argument("--seed", type=int, default=0)

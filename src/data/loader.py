@@ -5,7 +5,6 @@ from pathlib import Path
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
-from transformers import AutoTokenizer
 
 GENRES = [
     "Action", "Adventure", "Animation", "Biography", "Comedy", "Crime",
@@ -78,6 +77,8 @@ def get_loaders(
     label_fraction: float = 1.0,
     seed: int = 0,
 ) -> dict[str, DataLoader]:
+    from transformers import AutoTokenizer
+
     csv_path = dataset_root / "tinymmimdb" / "data.csv"
     images_dir = dataset_root / "tinymmimdb" / "images"
 

@@ -7,6 +7,5 @@ dataset/*
 __pycache__/
 *.py[cod]
 .pytest_cache/
-results/
 docs/main.pdf
 docs/
